@@ -38,12 +38,12 @@
 #define MAX_WAIT_READ_BUSY	1000000
 
 /* For Raspberry B+ :*/
-// #define BCM2708_PERI_BASE	0x20000000
-// #define GPIO_BASE	 	(BCM2708_PERI_BASE + 0x200000)
+#define BCM2708_PERI_BASE	0x20000000
+#define GPIO_BASE	 	(BCM2708_PERI_BASE + 0x200000)
 
 /* For Raspberry 2B and 3B :*/
-#define BCM2736_PERI_BASE        0x3F000000
-#define GPIO_BASE                (BCM2736_PERI_BASE + 0x200000) /* GPIO controller */
+//#define BCM2736_PERI_BASE        0x3F000000
+//#define GPIO_BASE                (BCM2736_PERI_BASE + 0x200000) /* GPIO controller */
 
 // IMPORTANT: BE VERY CAREFUL TO CONNECT VCC TO P1-01 (3.3V) AND *NOT* P1-02 (5V) !!
 // IMPORTANT: MAY BE YOU NEED EXTERNAL 1.8V for modern NANDs
@@ -65,6 +65,8 @@ int read_id(unsigned char id[5]);
 int read_pages(int first_page_number, int number_of_pages, char *outfile, int write_spare);
 int write_pages(int first_page_number, int number_of_pages, char *infile);
 int erase_blocks(int first_block_number, int number_of_blocks);
+
+volatile int is_spansion;
 
 inline void INP_GPIO(int g)
 {
@@ -326,6 +328,16 @@ void print_id(unsigned char id[5])
  			}
  			break;
  		}
+        case 0x01: {
+            strcpy(maker, "Spansion");
+ 			switch(id[1]) {
+                case 0xA1: strcpy(device, "S34MS01G2"); break;
+                case 0xAA: strcpy(device, "S34MS02G2"); break;
+                case 0xAC: strcpy(device, "S34MS04G2"); break;
+ 				default: strcpy(device, "unknown");
+ 			}
+ 			break;
+        }
  		default: strcpy(maker, "unknown"); strcpy(device, "unknown");
  	}
 
@@ -380,6 +392,11 @@ void print_id(unsigned char id[5])
 		case 110: plane_size = 4096 / 8 * 1024 * 1024; break; // 4 gigabits
 		case 111: plane_size = 8192 / 8 * 1024 * 1024; break; // 8 gigabits
 	}
+
+	if(id[0] == 0x01 && id[1] == 0xA1){ // Special hack for S34MS01G2
+        plane_number = 1;
+        plane_size = 1024 / 8 * 1024 * 1024; // 1 gigabit
+    }
 
 	nand_size = plane_number * plane_size;
 	nandras_size = nand_size + ras_size * nand_size / 512;
@@ -451,6 +468,7 @@ int read_id(unsigned char id[5])
 		GPIO_SET_1(N_READ_ENABLE);
 		shortpause();
 	}
+
 	if (id != NULL)
 		memcpy(id, buf, 5);
 	else
@@ -528,7 +546,7 @@ int send_read_command(int page)
 	return 0;
 }
 
-int send_write_command(int page, unsigned char data[PAGE_SIZE])
+int send_write_command(int page, unsigned char data[PAGE_SIZE], int len, int is_spansion = 0)
 {
 	int i;
 
@@ -538,7 +556,12 @@ int send_write_command(int page, unsigned char data[PAGE_SIZE])
 	shortpause();
 	GPIO_SET_0(N_WRITE_ENABLE);
 	shortpause();
-	GPIO_DATA8_OUT(0x80);
+    if(is_spansion){
+        GPIO_DATA8_OUT(0x8B);
+        printf("Spansion mode 0x8B ");
+    }else{
+        GPIO_DATA8_OUT(0x80);
+    }
 	shortpause();
 	GPIO_SET_1(N_WRITE_ENABLE);
 	shortpause();
@@ -564,7 +587,7 @@ int send_write_command(int page, unsigned char data[PAGE_SIZE])
 	GPIO_SET_0(ADDRESS_LATCH_ENABLE);
 	shortpause();
 
-	for (i = 0; i < PAGE_SIZE; i++) {
+	for (i = 0; i < len; i++) {
 		GPIO_SET_0(N_WRITE_ENABLE);
 		shortpause();
 		GPIO_DATA8_OUT(data[i]); //
@@ -721,6 +744,7 @@ int read_pages(int first_page_number, int number_of_pages, char *outfile, int wr
 			// printf("Busy\n");
 			shortpause();
 		}
+		shortpause();
 		// if (i == MAX_WAIT_READ_BUSY) {
 		// 	// #ifdef DEBUG
 		// 		printf("N_READ_BUSY was not brought to 0 by NAND in time, retrying\n");
@@ -890,8 +914,9 @@ int write_pages(int first_page_number, int number_of_pages, char *infile)
 			fflush(stdout);
 		}
 
-		fseek(f, page * PAGE_SIZE, SEEK_SET);
-		fread(buf, PAGE_SIZE, 1, f);
+		memset(buf, 0xFF, PAGE_SIZE);
+		//fseek(f, page * PAGE_SIZE, SEEK_SET);
+		fread(buf, 2048, 1, f);
 
 		// printf("\nwriting page n°%d\n", page);
 
@@ -901,12 +926,14 @@ int write_pages(int first_page_number, int number_of_pages, char *infile)
 			printf("\nNAND ID has changed! retrying");
 			goto retry;
 		}
+		shortpause();
 
-		send_write_command(page, buf);
+		send_write_command(page, buf, 2048, (id[0] == 0x01));
 		while (GPIO_READ(N_READ_BUSY) == 0) {
 			// printf("Busy\n");
 			shortpause();
 		}
+		shortpause();
 		// read_status();
 		if (read_status()) {
 			if (retry_count == 0) printf("\n");
@@ -918,6 +945,7 @@ int write_pages(int first_page_number, int number_of_pages, char *infile)
 			printf("Too many retries. Perhaps bad block?\n");
 			// retry_count = 0;
 		}
+		shortpause();
 		retry_count = 0;
 	}
 
@@ -968,6 +996,10 @@ int erase_blocks(int first_block_number, int number_of_blocks)
 		while (GPIO_READ(N_READ_BUSY) == 0) {
 			// printf("Busy\n");
 			shortpause();
+		}
+
+		for (int i = 0; i < 10000; i++) { // Just in case
+            shortpause();
 		}
 
 		if (read_status()) {
