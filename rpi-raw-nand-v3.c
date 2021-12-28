@@ -66,8 +66,6 @@ int read_pages(int first_page_number, int number_of_pages, char *outfile, int wr
 int write_pages(int first_page_number, int number_of_pages, char *infile);
 int erase_blocks(int first_block_number, int number_of_blocks);
 
-volatile int is_spansion;
-
 inline void INP_GPIO(int g)
 {
 #ifdef DEBUG
@@ -158,7 +156,7 @@ inline void GPIO_DATA8_OUT(int data)
 }
 
 int delay = 1;
-int shortpause()
+void shortpause()
 {
 	int i;
 	volatile static int dontcare = 0;
@@ -166,14 +164,6 @@ int shortpause()
 		dontcare++;
 	}
 }
-
-// void shortpause()
-// {
-//     struct timespec ts;
-//     ts.tv_sec = delay / 1000;
-//     ts.tv_nsec = (delay % 1000) * 1000000;
-//     nanosleep(&ts, NULL);
-// }
 
 int main(int argc, char **argv)
 { 
@@ -223,7 +213,6 @@ usage:
 		    " read_full <page #> <# of pages> <output file> : read N pages including spare\n" \
 		    " read_data <page #> <# of pages> <output file> : read N pages, discard spare\n" \
 		    " write_full <page #> <# of pages> <input file> : write N pages, including spare\n" \
-		    " write_data <page #> <# of pages> <input file> : write N pages, discard spare\n" \
 		    " erase_blocks <block number> <# of blocks>     : erase N blocks\n\n" \
 		    "Notes:\n" \
 		    " This program assumes PAGE_SIZE == %d\n" \
@@ -277,6 +266,21 @@ usage:
 
 	printf("unknown command '%s'\n", argv[2]);
 	goto usage;
+
+    set_data_direction_in();
+
+    GPIO_SET_0(N_WRITE_PROTECT);
+	GPIO_SET_0(N_READ_ENABLE);
+	GPIO_SET_0(N_WRITE_ENABLE);
+	GPIO_SET_0(COMMAND_LATCH_ENABLE);
+	GPIO_SET_0(ADDRESS_LATCH_ENABLE);
+
+    INP_GPIO(N_READ_BUSY);
+	INP_GPIO(N_WRITE_PROTECT);
+	INP_GPIO(N_READ_ENABLE);
+	INP_GPIO(N_WRITE_ENABLE);
+	INP_GPIO(COMMAND_LATCH_ENABLE);
+	INP_GPIO(ADDRESS_LATCH_ENABLE);
 	return 0;
 }
 
@@ -546,7 +550,7 @@ int send_read_command(int page)
 	return 0;
 }
 
-int send_write_command(int page, unsigned char data[PAGE_SIZE], int len, int is_spansion = 0)
+int send_write_command(int page, unsigned char data[PAGE_SIZE], int is_spansion = 0)
 {
 	int i;
 
@@ -587,7 +591,7 @@ int send_write_command(int page, unsigned char data[PAGE_SIZE], int len, int is_
 	GPIO_SET_0(ADDRESS_LATCH_ENABLE);
 	shortpause();
 
-	for (i = 0; i < len; i++) {
+	for (i = 0; i < PAGE_SIZE; i++) {
 		GPIO_SET_0(N_WRITE_ENABLE);
 		shortpause();
 		GPIO_DATA8_OUT(data[i]); //
@@ -736,32 +740,15 @@ int read_pages(int first_page_number, int number_of_pages, char *outfile, int wr
 			goto retry;
 		}
 		send_read_command(page_no);
-		//for (i = 0; i < MAX_WAIT_READ_BUSY; i++) {
-		//	if (GPIO_READ(N_READ_BUSY) == 0)
-		//		break;
-		//}
+
 		while (GPIO_READ(N_READ_BUSY) == 0) {
 			// printf("Busy\n");
 			shortpause();
 		}
 		shortpause();
-		// if (i == MAX_WAIT_READ_BUSY) {
-		// 	// #ifdef DEBUG
-		// 		printf("N_READ_BUSY was not brought to 0 by NAND in time, retrying\n");
-		// 	// #endif
-		// 	goto retry;
-		// }
+
 		set_data_direction_in();
-		// for (i = 0; i < MAX_WAIT_READ_BUSY; i++) {
-		// 	if (GPIO_READ(N_READ_BUSY) == 1)
-		// 		break;
-		// }
-		// if (i == MAX_WAIT_READ_BUSY) {
-		// 	// #ifdef DEBUG
-		// 		printf("N_READ_BUSY was not brought to 1 by NAND in time, retrying\n");
-		// 	// #endif
-		// 	goto retry;
-		// }
+
 		n = PAGE_SIZE*(page & 1);
 		for (i = 0; i < PAGE_SIZE; i++) {
 			GPIO_SET_0(N_READ_ENABLE);
@@ -807,75 +794,10 @@ int read_pages(int first_page_number, int number_of_pages, char *outfile, int wr
 	//show cursor
 	// printf("\e[?25h");
 	// fflush(stdout) ;
+    return 0;
 }
 
 
-/*int read_pages(int first_page_number, int number_of_pages, char *outfile, int write_spare)
-{
-	int page, block_no, page_nbr, percent, i;
-	unsigned char buf[PAGE_SIZE], id[5], id2[5];;
-	FILE *f = fopen(outfile, "w+");
-	if (f == NULL) {
-		perror("fopen output file");
-		return -1;
-	}
-	if (GPIO_READ(N_READ_BUSY) == 0) {
-		error_msg((char*)"N_READ_BUSY should be 1 (pulled up), but reads as 0. make sure the NAND is powered on");
-		return -1;
-	}
-
-	if (read_id(id) < 0)
-		return -1;
-	print_id(id);
-	printf("if this ID is incorrect, press Ctrl-C NOW to abort (3s timeout)\n");
-	sleep(3);
-
-	printf("\nStart reading...\n\n");
-	clock_t start = clock();
-
-
-	for (page = first_page_number; page < first_page_number + number_of_pages; page++) {
-
-		// printf("page = %d, n = %d\n",page, n);
-
-		// page_nbr = page - first_page_number + 1;
-		// percent = (100 * page_nbr) / number_of_pages;
-		// block_no = page / 64;
-		// printf("Reading page n° %d in block n° %d (page %d of %d), %d%%\n", page, block_no, page_nbr, number_of_pages, percent);
-		printf("\nReading page n° %d\n", page);
-
-		send_read_command(page);
-		while (GPIO_READ(N_READ_BUSY) == 0) {
-			// printf("Busy\n");
-			shortpause();
-		}
-		set_data_direction_in();
-		for (i = 0; i < PAGE_SIZE; i++) {
-			GPIO_SET_0(N_READ_ENABLE);
-			shortpause();
-			buf[i] = GPIO_DATA8_IN(); //
-			shortpause();
-			GPIO_SET_1(N_READ_ENABLE);
-			shortpause();
-		}
-		if (write_spare) {
-			if (fwrite(buf, PAGE_SIZE, 1, f) != 1) {
-				perror("fwrite");
-				return -1;
-			}
-		}
-		else {
-			if (fwrite(buf, 512 * (PAGE_SIZE / 512), 1, f) != 1) {
-				perror("fwrite");
-				return -1;
-			}
-		}
-	}
-	fcloseall();
-	clock_t end = clock();
-	printf("\nReading done in %f seconds\n", (float)(end - start) / CLOCKS_PER_SEC);
-}
-*/
 int write_pages(int first_page_number, int number_of_pages, char *infile)
 {
 	int page, block_no, page_nbr, percent, retry_count;
@@ -914,9 +836,9 @@ int write_pages(int first_page_number, int number_of_pages, char *infile)
 			fflush(stdout);
 		}
 
-		memset(buf, 0xFF, PAGE_SIZE);
+		//memset(buf, 0xFF, PAGE_SIZE);
 		//fseek(f, page * PAGE_SIZE, SEEK_SET);
-		fread(buf, 2048, 1, f);
+		fread(buf, PAGE_SIZE, 1, f);
 
 		// printf("\nwriting page n°%d\n", page);
 
@@ -928,7 +850,7 @@ int write_pages(int first_page_number, int number_of_pages, char *infile)
 		}
 		shortpause();
 
-		send_write_command(page, buf, 2048, (id[0] == 0x01));
+		send_write_command(page, buf, (id[0] == 0x01));
 		while (GPIO_READ(N_READ_BUSY) == 0) {
 			// printf("Busy\n");
 			shortpause();
@@ -949,13 +871,10 @@ int write_pages(int first_page_number, int number_of_pages, char *infile)
 		retry_count = 0;
 	}
 
-
-
-
-
 	fcloseall();
 	clock_t end = clock();
 	printf("\nWrite done in %f seconds\n", (float)(end - start) / CLOCKS_PER_SEC);
+    return 0;
 }
 
 int erase_blocks(int first_block_number, int number_of_blocks)
@@ -966,8 +885,16 @@ int erase_blocks(int first_block_number, int number_of_blocks)
 	if (read_id(id) < 0)
 		return -1;
 	print_id(id);
-	printf("if this ID is incorrect, press Ctrl-C NOW to abort (3s timeout)\n");
-	sleep(3);
+	//printf("if this ID is incorrect, press Ctrl-C NOW to abort (3s timeout)\n");
+	//sleep(3);
+
+    printf("Are you sure? Erasing by BLOCKS, not pages! Start from block %d at address 0x%02X up to 0x%02X [y/n]\n",
+           first_block_number, first_block_number*64*2048, (first_block_number+number_of_blocks)*64*2048-1);
+    char answ[5];
+    scanf("%19s", answ);
+    if(answ[0] != 'y'){
+        return 0;
+    }
 
 	printf("\nStart erasing...\n");
 	clock_t start = clock();
@@ -980,7 +907,7 @@ int erase_blocks(int first_block_number, int number_of_blocks)
 		percent = (100 * block_nbr) / number_of_blocks;
 
 		if (retry_count == 0) {
-			printf("Erasing block n° %d at adress 0x%02X (block %d of %d), %d%%\r", block, block * BLOCK_SIZE, block_nbr, number_of_blocks, percent);
+			printf("Erasing block n° %d at address 0x%02X (block %d of %d), %d%%\r", block, block * BLOCK_SIZE, block_nbr, number_of_blocks, percent);
 			fflush(stdout);
 			// printf("Block address : %d (0x%02X)\n", block * BLOCK_SIZE, block * BLOCK_SIZE);
 		}
@@ -1017,5 +944,5 @@ int erase_blocks(int first_block_number, int number_of_blocks)
 
 	clock_t end = clock();
 	printf("\nErasing done in %f seconds\n", (float)(end - start) / CLOCKS_PER_SEC);
-
+    return 0;
 }
